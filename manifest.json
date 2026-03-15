@@ -1,0 +1,18 @@
+{
+  "name": "饮食账本",
+  "short_name": "饮食账本",
+  "description": "个人饮食花销追踪器",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#04050a",
+  "theme_color": "#04050a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
