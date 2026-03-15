@@ -1,0 +1,863 @@
+import { useState, useEffect, useRef } from "react";
+
+const KEY = "meal-v6";
+const DEF = { monthlyBudget: 1178, dailyLimit: 38, entries: [], recurring: [] };
+function load() { try { const s = localStorage.getItem(KEY); return s ? JSON.parse(s) : DEF; } catch { return DEF; } }
+function save(d) { try { localStorage.setItem(KEY, JSON.stringify(d)); } catch {} }
+
+function useWindowWidth() {
+  const [w, sw] = useState(typeof window !== "undefined" ? window.innerWidth : 800);
+  useEffect(() => {
+    const h = () => sw(window.innerWidth);
+    window.addEventListener("resize", h);
+    return () => window.removeEventListener("resize", h);
+  }, []);
+  return w;
+}
+
+function getAmortizedForDay(dateStr, recurring) {
+  return (recurring || []).filter(r => {
+    if (!r.active) return false;
+    if (r.startDate > dateStr) return false;
+    const end = new Date(r.startDate + "T00:00:00");
+    end.setDate(end.getDate() + r.days - 1);
+    return dateStr <= end.toISOString().split("T")[0];
+  }).reduce((s, r) => s + r.dailyCost, 0);
+}
+
+function N({ v, pre = "¥", dec = 0, s = {}, c }) {
+  return <span style={{ fontVariantNumeric: "tabular-nums", color: c, ...s }}>{pre}{v.toFixed(dec)}</span>;
+}
+
+function Bdg({ value, over }) {
+  return <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 7px", borderRadius: 5, background: over ? "rgba(239,68,68,0.1)" : "rgba(22,163,74,0.1)", color: over ? "#ef4444" : "#16a34a", border: `1px solid ${over ? "rgba(239,68,68,0.2)" : "rgba(22,163,74,0.2)"}`, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{over ? "−" : "+"}{Math.abs(value).toFixed(0)}</span>;
+}
+
+function EI({ value, onSave, onCancel }) {
+  const [v, sv] = useState(String(value));
+  const s = () => { const n = parseFloat(v); if (n > 0) onSave(n); else onCancel(); };
+  return <div style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+    <input type="text" inputMode="decimal" value={v} onChange={e => sv(e.target.value)} autoFocus onKeyDown={e => { if (e.key === "Enter") s(); if (e.key === "Escape") onCancel(); }} style={{ width: 68, background: "rgba(0,0,0,0.07)", border: "1px solid rgba(0,0,0,0.18)", color: "#1a1714", borderRadius: 6, padding: "3px 7px", fontSize: 13, outline: "none", fontFamily: "inherit" }} />
+    <button onClick={s} style={{ background: "rgba(22,163,74,0.12)", border: "1px solid rgba(22,163,74,0.3)", color: "#16a34a", borderRadius: 6, padding: "3px 8px", fontSize: 12, cursor: "pointer" }}>✓</button>
+  </div>;
+}
+
+function EditBudget({ value, onSave }) {
+  const [ed, se] = useState(false);
+  return ed ? <EI value={value} onSave={v => { onSave(v); se(false); }} onCancel={() => se(false)} />
+    : <div onClick={() => se(true)} style={{ fontSize: 13, color: "#5a5550", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>¥{value}<span style={{ fontSize: 9, color: "#888", background: "rgba(0,0,0,0.05)", padding: "1px 5px", borderRadius: 3 }}>编辑</span></div>;
+}
+
+function EditLimit({ value, onSave }) {
+  const [ed, se] = useState(false);
+  return ed ? <EI value={value} onSave={v => { onSave(v); se(false); }} onCancel={() => se(false)} />
+    : <div onClick={() => se(true)} style={{ fontSize: 13, color: "#5a5550", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>¥{value}<span style={{ fontSize: 9, color: "#888", background: "rgba(0,0,0,0.05)", padding: "1px 5px", borderRadius: 3 }}>编辑</span></div>;
+}
+
+function DatePicker({ value, onChange, entries, dailyLimit, recurring }) {
+  const [open, setOpen] = useState(false);
+  const [vy, setVy] = useState(() => parseInt(value.slice(0, 4)));
+  const [vm, setVm] = useState(() => parseInt(value.slice(5, 7)) - 1);
+  const ref = useRef(null);
+  const td = new Date().toISOString().split("T")[0];
+  useEffect(() => {
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    if (open) document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  const sm = {}; entries.forEach(e => { sm[e.date] = (sm[e.date] || 0) + e.amount; });
+  const mk = `${vy}-${String(vm + 1).padStart(2, "0")}`;
+  const mp = Object.keys(sm).filter(d => d.startsWith(mk) && d < td);
+  const md = mp.reduce((a, d) => a + (dailyLimit - (sm[d] || 0) - getAmortizedForDay(d, recurring)), 0);
+  const mo = md < 0;
+  const fd = new Date(vy, vm, 1).getDay();
+  const dim = new Date(vy, vm + 1, 0).getDate();
+  const cells = [...Array(fd).fill(null), ...Array.from({ length: dim }, (_, i) => i + 1)];
+  const ts = day => `${vy}-${String(vm + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const lbl = str => {
+    if (str === td) return "今天";
+    const y = new Date(); y.setDate(y.getDate() - 1);
+    if (str === y.toISOString().split("T")[0]) return "昨天";
+    const d = new Date(str + "T00:00:00");
+    return `${d.getMonth() + 1}月${d.getDate()}日`;
+  };
+  const it = value === td; const mc = mo ? "#ef4444" : "#16a34a";
+  const selSpent = (sm[value] || 0) + getAmortizedForDay(value, recurring);
+  const selDelta = dailyLimit - selSpent;
+  const selOver = selDelta < 0;
+  const selColor = selOver ? "#ef4444" : "#16a34a";
+  const showDayDelta = value < td;
+  return <div ref={ref} style={{ position: "relative", flexShrink: 0 }}>
+    <button onClick={() => setOpen(o => !o)} style={{ background: selOver ? "rgba(239,68,68,0.06)" : it ? "rgba(0,0,0,0.05)" : "rgba(22,163,74,0.08)", border: `1.5px solid ${selOver ? "rgba(239,68,68,0.25)" : it ? "rgba(0,0,0,0.1)" : "rgba(22,163,74,0.25)"}`, borderRadius: 10, padding: "8px 11px", display: "flex", alignItems: "center", gap: 7, cursor: "pointer", minWidth: 118, fontFamily: "inherit" }}>
+      <span style={{ fontSize: 15 }}>🗓</span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: selOver ? "#ef4444" : it ? "#4a4540" : "#16a34a" }}>{lbl(value)}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+          {showDayDelta ? <span style={{ fontSize: 8, fontWeight: 700, color: selColor }}>{selOver ? "超" : "余"} ¥{Math.abs(selDelta).toFixed(0)}</span>
+            : <><span style={{ fontSize: 8, color: "#7a7470" }}>{vm + 1}月</span><span style={{ fontSize: 8, fontWeight: 700, color: mc }}>{mo ? "−" : "+"}{Math.abs(md).toFixed(0)}</span></>}
+        </div>
+      </div>
+      <span style={{ fontSize: 9, color: "#bbb", marginLeft: "auto" }}>▾</span>
+    </button>
+    {open && <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 50, background: "#fff", border: "1px solid rgba(0,0,0,0.1)", borderRadius: 14, padding: 11, width: 252, boxShadow: "0 6px 24px rgba(0,0,0,0.1)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 9 }}>
+        <button onClick={() => { if (vm === 0) { setVm(11); setVy(y => y - 1); } else setVm(m => m - 1); }} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 17, color: "#555", padding: "2px 6px" }}>‹</button>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#1a1714" }}>{vy}年{vm + 1}月</div>
+          <div style={{ fontSize: 9, fontWeight: 600, color: mc }}>{mo ? "超出" : "节余"} {mo ? "−" : "+"}{Math.abs(md).toFixed(0)} 元</div>
+        </div>
+        <button onClick={() => { if (vm === 11) { setVm(0); setVy(y => y + 1); } else setVm(m => m + 1); }} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 17, color: "#555", padding: "2px 6px" }}>›</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2, marginBottom: 3 }}>
+        {["日", "一", "二", "三", "四", "五", "六"].map(d => <div key={d} style={{ textAlign: "center", fontSize: 8, fontWeight: 700, color: "#bbb" }}>{d}</div>)}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2 }}>
+        {cells.map((day, i) => {
+          if (!day) return <div key={i} />;
+          const ds = ts(day); const isSel = ds === value; const isT = ds === td; const isFut = ds > td;
+          const hd = sm[ds] !== undefined;
+          const delta = ds < td ? dailyLimit - (sm[ds] || 0) - getAmortizedForDay(ds, recurring) : null;
+          const dov = delta !== null && delta < 0;
+          return <button key={ds} onClick={() => { if (!isFut) { onChange(ds); setOpen(false); } }} style={{ background: isSel ? "#1a1714" : isT ? "rgba(0,0,0,0.06)" : "none", border: isT && !isSel ? "1.5px solid rgba(0,0,0,0.15)" : "1.5px solid transparent", borderRadius: 7, padding: "3px 1px", cursor: isFut ? "default" : "pointer", opacity: isFut ? 0.3 : 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 1, minHeight: 34 }} onMouseEnter={ev => { if (!isSel && !isFut) ev.currentTarget.style.background = "rgba(0,0,0,0.05)"; }} onMouseLeave={ev => { if (!isSel) ev.currentTarget.style.background = isT ? "rgba(0,0,0,0.06)" : "none"; }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: isSel ? "#fff" : "#1a1714" }}>{day}</span>
+            {delta !== null && hd && <span style={{ fontSize: 7, fontWeight: 700, color: isSel ? (dov ? "#fca5a5" : "#86efac") : (dov ? "#ef4444" : "#16a34a"), lineHeight: 1 }}>{dov ? "−" : "+"}{Math.abs(delta).toFixed(0)}</span>}
+          </button>;
+        })}
+      </div>
+    </div>}
+  </div>;
+}
+
+function Chart({ data, all, forceOpen = false }) {
+  const today = new Date();
+  const todayStr = today.toISOString().split("T")[0];
+  const monthBudget = data.monthlyBudget;
+  const year = today.getFullYear(), month = today.getMonth();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const todayDate = today.getDate();
+  const [hov, setHov] = useState(null);
+  const svgRef = useRef(null);
+  const spm = {};
+  all.filter(e => e.date.startsWith(todayStr.slice(0, 7))).forEach(e => { spm[e.date] = (spm[e.date] || 0) + e.amount; });
+  const actualCum = [];
+  let cum = 0;
+  for (let d = 1; d <= todayDate; d++) {
+    const ds = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    cum += (spm[ds] || 0) + getAmortizedForDay(ds, data.recurring);
+    actualCum.push({ day: d, val: cum });
+  }
+  const lastActual = actualCum[actualCum.length - 1];
+  const cumSpent = lastActual?.val || 0;
+  const recentAvg = actualCum.length > 0
+    ? actualCum.slice(-7).reduce((s, p, i, arr) => { const prev = i === 0 ? (actualCum[actualCum.length - arr.length - 1]?.val || 0) : arr[i - 1].val; return s + (p.val - prev); }, 0) / Math.min(7, actualCum.length)
+    : data.dailyLimit;
+  const daysLeft = daysInMonth - todayDate;
+  const projEndVal = cumSpent + recentAvg * daysLeft;
+  const willOvershoot = projEndVal > monthBudget;
+  const overBy = projEndVal - monthBudget;
+  const projColor = willOvershoot ? "#ef4444" : "#16a34a";
+  const remaining = monthBudget - cumSpent;
+  let futAmortTotal = 0;
+  for (let d = todayDate; d <= daysInMonth; d++) {
+    const ds = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    futAmortTotal += getAmortizedForDay(ds, data.recurring);
+  }
+  const daysFromToday = daysLeft + 1;
+  const futAmortPerDay = daysFromToday > 0 ? futAmortTotal / daysFromToday : 0;
+  const recommended = daysLeft > 0 ? Math.max(0, remaining / daysLeft - futAmortPerDay) : 0;
+  const diffFromLimit = recommended - data.dailyLimit;
+  const recColor = recommended <= 0 ? "#ef4444" : diffFromLimit >= 0 ? "#16a34a" : "#ef4444";
+  if (actualCum.length === 0) return <div style={{ fontSize: 11, color: "#ccc", textAlign: "center", padding: "20px 0" }}>记录几天后显示图表</div>;
+  const W = 280, H = 90, pL = 6, pR = 6, pT = 18, pB = 14;
+  const cW = W - pL - pR, cH = H - pT - pB;
+  const maxVal = Math.max(monthBudget * 1.12, projEndVal * 1.08);
+  const toX = d => pL + ((d - 1) / (daysInMonth - 1)) * cW;
+  const toY = v => pT + (1 - v / maxVal) * cH;
+  const budgetY = toY(monthBudget);
+  const smoothPath = pts => {
+    if (pts.length < 2) return "";
+    let d = `M ${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+    for (let i = 1; i < pts.length; i++) {
+      const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+      const cp = (x1 - x0) * 0.4;
+      d += ` C ${(x0 + cp).toFixed(1)} ${y0.toFixed(1)}, ${(x1 - cp).toFixed(1)} ${y1.toFixed(1)}, ${x1.toFixed(1)} ${y1.toFixed(1)}`;
+    }
+    return d;
+  };
+  const actualPtsArr = actualCum.map(p => [toX(p.day), toY(p.val)]);
+  const actualPath = smoothPath(actualPtsArr);
+  const lastPt = actualPtsArr[actualPtsArr.length - 1];
+  const areaPath = actualPath + ` L ${lastPt[0].toFixed(1)} ${toY(0).toFixed(1)} L ${toX(1).toFixed(1)} ${toY(0).toFixed(1)} Z`;
+  const handleMouse = e => {
+    const rect = svgRef.current?.getBoundingClientRect(); if (!rect) return;
+    const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+    const day = Math.max(1, Math.min(daysInMonth, Math.round(((x - pL) / cW) * (daysInMonth - 1) + 1)));
+    setHov(day);
+  };
+  const hovActual = hov ? actualCum.find(p => p.day === hov) : null;
+  const hovProjVal = hov && hov > todayDate ? cumSpent + recentAvg * (hov - todayDate) : null;
+  const dotColor = lastActual && lastActual.val > (lastActual.day / daysInMonth) * monthBudget ? "#ef4444" : "#16a34a";
+  const projX1 = lastActual ? toX(lastActual.day) : 0, projY1 = lastActual ? toY(lastActual.val) : 0;
+  const projX2 = toX(daysInMonth), projY2 = toY(projEndVal);
+  const midX = (projX1 + projX2) / 2, midY = (projY1 + projY2) / 2;
+  const lineAngle = Math.atan2(projY2 - projY1, projX2 - projX1);
+  const lblX = midX + Math.sin(lineAngle) * 13, lblY = midY - Math.cos(lineAngle) * 13;
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        {[
+          { label: "实际日均", val: `¥${recentAvg.toFixed(0)}`, sub: "近7天", color: "#1a1714", border: "rgba(0,0,0,0.1)" },
+          { label: "预计月底", val: `¥${projEndVal.toFixed(0)}`, sub: willOvershoot ? `超¥${overBy.toFixed(0)}` : `省¥${Math.abs(overBy).toFixed(0)}`, color: projColor, border: projColor },
+          { label: "可用日均", val: `¥${recommended.toFixed(0)}`, sub: "扣摊销后", color: recColor, border: recColor },
+        ].map(({ label, val, sub, color, border }) => (
+          <div key={label} style={{ flex: 1, padding: "6px 9px", borderRadius: 9, background: "rgba(0,0,0,0.02)", borderBottom: `2px solid ${border}` }}>
+            <div style={{ fontSize: 9, fontWeight: 700, color: "#888", marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{val}</div>
+            <div style={{ fontSize: 8, color: color, marginTop: 2, opacity: 0.7 }}>{sub}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ minHeight: 12, marginBottom: 4 }}>
+        {hov ? <div style={{ display: "flex", gap: 10, fontSize: 10, fontWeight: 600 }}>
+          <span style={{ color: "#aaa" }}>{hov}日</span>
+          {hovActual && <span style={{ color: "#1a1714" }}>¥{hovActual.val.toFixed(0)}</span>}
+          {hovProjVal && <span style={{ color: projColor }}>预测 ¥{hovProjVal.toFixed(0)}</span>}
+        </div> : <span style={{ fontSize: 8, color: "#ccc" }}>滑动查看</span>}
+      </div>
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} width="100%" height={H}
+        style={{ display: "block", overflow: "visible", cursor: "crosshair" }}
+        onMouseMove={handleMouse} onMouseLeave={() => setHov(null)}
+        onTouchMove={e => { e.preventDefault(); handleMouse(e); }} onTouchEnd={() => setHov(null)}>
+        <defs>
+          <linearGradient id="cF" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#1a1714" stopOpacity="0.09" /><stop offset="100%" stopColor="#1a1714" stopOpacity="0" /></linearGradient>
+          <linearGradient id="pF" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={projColor} stopOpacity="0.07" /><stop offset="100%" stopColor={projColor} stopOpacity="0" /></linearGradient>
+        </defs>
+        <line x1={pL} y1={budgetY} x2={W - pR} y2={budgetY} stroke="rgba(239,68,68,0.18)" strokeWidth="1" strokeDasharray="3,5" />
+        <text x={pL} y={budgetY - 4} fontSize="7" fill="rgba(239,68,68,0.35)" fontWeight="600">预算上限</text>
+        <path d={areaPath} fill="url(#cF)" />
+        {lastActual && <path d={`M ${projX1.toFixed(1)} ${toY(0).toFixed(1)} L ${projX1.toFixed(1)} ${projY1.toFixed(1)} L ${projX2.toFixed(1)} ${projY2.toFixed(1)} L ${projX2.toFixed(1)} ${toY(0).toFixed(1)} Z`} fill="url(#pF)" />}
+        {lastActual && <line x1={projX1} y1={projY1} x2={projX2} y2={projY2} stroke={projColor} strokeWidth="1.4" strokeDasharray="5,4" strokeLinecap="round" opacity="0.6" />}
+        {lastActual && <><circle cx={projX2} cy={projY2} r="2.5" fill={projColor} opacity="0.7" /><text x={projX2} y={projY2 - 7} textAnchor="middle" fontSize="8" fontWeight="700" fill={projColor} opacity="0.85">¥{projEndVal.toFixed(0)}</text></>}
+        {lastActual && daysLeft > 2 && <g><rect x={lblX - 24} y={lblY - 10} width={48} height={14} rx="5" fill={willOvershoot ? "rgba(239,68,68,0.1)" : "rgba(22,163,74,0.1)"} stroke={projColor} strokeWidth="0.5" strokeOpacity="0.3" /><text x={lblX} y={lblY} textAnchor="middle" fontSize="7.5" fontWeight="700" fill={projColor}>日均 ¥{recentAvg.toFixed(0)}</text></g>}
+        <path d={actualPath} fill="none" stroke="#1a1714" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        {lastActual && <><circle cx={lastPt[0]} cy={lastPt[1]} r="6" fill="none" stroke={dotColor} strokeWidth="1" opacity="0.15" /><circle cx={lastPt[0]} cy={lastPt[1]} r="4" fill="#f5f2ee" stroke={dotColor} strokeWidth="1.8" /><circle cx={lastPt[0]} cy={lastPt[1]} r="1.5" fill={dotColor} /></>}
+        {hov && <><line x1={toX(hov)} y1={pT} x2={toX(hov)} y2={H - pB} stroke="rgba(0,0,0,0.07)" strokeWidth="1" />{hovActual && <circle cx={toX(hov)} cy={toY(hovActual.val)} r="2.5" fill="#f5f2ee" stroke="#1a1714" strokeWidth="1.5" />}{hovProjVal && <circle cx={toX(hov)} cy={toY(hovProjVal)} r="2.5" fill="#f5f2ee" stroke={projColor} strokeWidth="1.5" />}</>}
+        <text x={toX(1)} y={H} textAnchor="start" fontSize="7.5" fill="#ccc">1</text>
+        <text x={toX(todayDate)} y={H} textAnchor="middle" fontSize="7.5" fill="#888" fontWeight="600">今</text>
+        <text x={toX(daysInMonth)} y={H} textAnchor="end" fontSize="7.5" fill="#ccc">{daysInMonth}</text>
+      </svg>
+    </div>
+  );
+}
+
+function CumulativeCard({ cd, cc, co, past, safeDays, overDays, daysElapsed, td, tsp, rem, data, forceOpen = false }) {
+  const [chartOpen, setChartOpen] = useState(false);
+  const show = chartOpen || forceOpen;
+  return (
+    <div style={{ background: "#fff", border: `1.5px solid ${co ? "rgba(239,68,68,0.35)" : "rgba(22,163,74,0.3)"}`, borderRadius: 14, padding: "10px 13px", marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 700, color: "#888", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 3 }}>本月累计盈余</div>
+          <div style={{ fontSize: 10, color: "#999", marginBottom: 4 }}>
+            {past.length > 0 ? <span><span style={{ color: "#16a34a", fontWeight: 700 }}>{safeDays} 天在控</span><span style={{ color: "#ccc", margin: "0 5px" }}>/</span><span style={{ color: overDays > 0 ? "#ef4444" : "#ccc", fontWeight: overDays > 0 ? 700 : 400 }}>{overDays} 天超支</span></span> : "今天是本月第一天"}
+          </div>
+          <N v={Math.abs(cd)} c={cc} s={{ fontSize: 26, fontWeight: 700, lineHeight: 1 }} pre={co ? "-¥" : "+¥"} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+          {daysElapsed > 0 && (() => {
+            const t = new Date(td + "T00:00:00");
+            const dm = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
+            const dl2 = tsp > 0 ? dm - t.getDate() : dm - t.getDate() + 1;
+            if (dl2 <= 0) return null;
+            let futAmort = 0;
+            for (let d2 = t.getDate() + 1; d2 <= dm; d2++) {
+              const ds = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(d2).padStart(2, "0")}`;
+              futAmort += getAmortizedForDay(ds, data.recurring);
+            }
+            const df = (rem / dl2) - (futAmort / dl2) - data.dailyLimit;
+            const cm2 = df >= 0;
+            return <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 9, color: "#999", marginBottom: 1 }}>剩 {dl2} 天</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: cm2 ? "#16a34a" : "#ef4444" }}>每天{cm2 ? "多花" : "少花"}</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: cm2 ? "#16a34a" : "#ef4444", fontVariantNumeric: "tabular-nums" }}>¥{Math.abs(df).toFixed(1)}</div>
+            </div>;
+          })()}
+          {!forceOpen && <button onClick={() => setChartOpen(o => !o)} style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(0,0,0,0.06)", border: "none", borderRadius: 7, padding: "4px 10px", cursor: "pointer", fontSize: 11, fontWeight: 700, color: "#5a5550", fontFamily: "inherit" }}>
+            <span style={{ display: "inline-block", transition: "transform 0.2s", transform: show ? "rotate(180deg)" : "rotate(0deg)" }}>▾</span>
+            {show ? "收起" : "趋势图"}
+          </button>}
+        </div>
+      </div>
+      {show && <div style={{ marginTop: 10, borderTop: "1px solid rgba(0,0,0,0.06)", paddingTop: 10 }}>
+        <Chart data={data} all={data.entries} forceOpen={forceOpen} />
+      </div>}
+    </div>
+  );
+}
+
+function RecurringPanel({ data, setData }) {
+  const [form, setForm] = useState(null);
+  const recurring = data.recurring || [];
+  const categories = ["早饭", "午饭", "晚饭", "杂食"];
+  const emptyForm = { name: "", category: "早饭", cost: "", mode: "days", days: "", totalG: "", totalUnit: "g", dailyG: "", dailyUnit: "g", startDate: new Date().toISOString().split("T")[0] };
+  const calcDailyCost = f => {
+    const cost = parseFloat(f.cost); if (!cost || cost <= 0) return null;
+    if (f.mode === "days") { const d = parseInt(f.days); if (!d || d <= 0) return null; return { dailyCost: cost / d, days: d }; }
+    const toG = (v, unit) => unit === "lb" ? v * 453.592 : v;
+    const tg = toG(parseFloat(f.totalG), f.totalUnit), dg = toG(parseFloat(f.dailyG), f.dailyUnit);
+    if (!tg || !dg || tg <= 0 || dg <= 0) return null;
+    return { dailyCost: cost / Math.ceil(tg / dg), days: Math.ceil(tg / dg) };
+  };
+  const saveItem = () => {
+    if (!form) return; const calc = calcDailyCost(form);
+    if (!calc || !form.name.trim()) return;
+    const item = { id: form.id || Date.now(), name: form.name.trim(), category: form.category, cost: parseFloat(form.cost), dailyCost: calc.dailyCost, days: calc.days, startDate: form.startDate, mode: form.mode, totalG: form.totalG, totalUnit: form.totalUnit || "g", dailyG: form.dailyG, dailyUnit: form.dailyUnit || "g", active: true };
+    if (form.id) setData(d => ({ ...d, recurring: (d.recurring || []).map(r => r.id === form.id ? item : r) }));
+    else setData(d => ({ ...d, recurring: [...(d.recurring || []), item] }));
+    setForm(null);
+  };
+  const del = id => setData(d => ({ ...d, recurring: (d.recurring || []).filter(r => r.id !== id) }));
+  const toggle = id => setData(d => ({ ...d, recurring: (d.recurring || []).map(r => r.id === id ? { ...r, active: !r.active } : r) }));
+  const preview = form ? calcDailyCost(form) : null;
+  const td = new Date().toISOString().split("T")[0];
+  const totalDaily = recurring.filter(r => {
+    if (!r.active) return false;
+    const end = new Date(r.startDate + "T00:00:00"); end.setDate(end.getDate() + r.days - 1);
+    return r.startDate <= td && end.toISOString().split("T")[0] >= td;
+  }).reduce((s, r) => s + r.dailyCost, 0);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {totalDaily > 0 && <div style={{ background: "rgba(22,163,74,0.06)", border: "1px solid rgba(22,163,74,0.15)", borderRadius: 10, padding: "8px 12px", fontSize: 12, color: "#16a34a", fontWeight: 600 }}>当前摊销日均合计 ¥{totalDaily.toFixed(2)}，已计入今日花销</div>}
+      {recurring.length === 0 && !form && <div style={{ textAlign: "center", color: "#bbb", fontSize: 13, padding: "24px 0" }}>还没有摊销项目</div>}
+      {recurring.map(r => {
+        const end = new Date(r.startDate + "T00:00:00"); end.setDate(end.getDate() + r.days - 1);
+        const endStr = end.toISOString().split("T")[0];
+        const expired = endStr < td;
+        const daysUsed = Math.max(0, Math.min(r.days, Math.ceil((new Date(td) - new Date(r.startDate + "T00:00:00")) / 86400000) + 1));
+        return (
+          <div key={r.id} style={{ background: r.active && !expired ? "#fff" : "rgba(0,0,0,0.02)", border: `1px solid ${r.active && !expired ? "rgba(0,0,0,0.08)" : "rgba(0,0,0,0.04)"}`, borderRadius: 12, padding: "11px 13px", opacity: expired ? 0.5 : 1 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 8 }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: "#1a1714" }}>{r.name}</span>
+                  <span style={{ fontSize: 9, color: "#999", background: "rgba(0,0,0,0.05)", padding: "1px 5px", borderRadius: 3 }}>{r.category}</span>
+                  {expired && <span style={{ fontSize: 9, color: "#ef4444", fontWeight: 600 }}>已用完</span>}
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#16a34a", fontVariantNumeric: "tabular-nums" }}>¥{r.dailyCost.toFixed(2)}<span style={{ fontSize: 11, color: "#999", fontWeight: 400 }}>/天</span><span style={{ fontSize: 11, color: "#bbb", fontWeight: 400, marginLeft: 8 }}>共¥{r.cost} · {r.days}天</span></div>
+              </div>
+              <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                <button onClick={() => toggle(r.id)} style={{ fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: r.active ? "rgba(22,163,74,0.1)" : "rgba(0,0,0,0.05)", color: r.active ? "#16a34a" : "#aaa", border: "none", cursor: "pointer" }}>{r.active ? "开" : "关"}</button>
+                <button onClick={() => setForm({ ...r, cost: String(r.cost), days: String(r.days), totalG: r.totalG || "", totalUnit: r.totalUnit || "g", dailyG: r.dailyG || "", dailyUnit: r.dailyUnit || "g" })} style={{ fontSize: 10, color: "#888", background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 6, padding: "3px 8px", cursor: "pointer" }}>编辑</button>
+                <button onClick={() => del(r.id)} style={{ fontSize: 12, color: "#c05050", background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.12)", borderRadius: 6, padding: "3px 8px", cursor: "pointer" }}>✕</button>
+              </div>
+            </div>
+            <div style={{ height: 3, background: "rgba(0,0,0,0.06)", borderRadius: 2, overflow: "hidden" }}><div style={{ height: "100%", width: `${Math.min(100, (daysUsed / r.days) * 100)}%`, background: expired ? "#ef4444" : "#16a34a", borderRadius: 2 }} /></div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+              <span style={{ fontSize: 9, color: "#bbb" }}>{r.startDate.slice(5).replace("-", "/")} 起</span>
+              <span style={{ fontSize: 9, color: "#bbb" }}>{daysUsed}/{r.days} 天 · 到 {endStr.slice(5).replace("-", "/")}</span>
+            </div>
+          </div>
+        );
+      })}
+      {!form && <button onClick={() => setForm({ ...emptyForm })} style={{ padding: "10px", borderRadius: 12, background: "rgba(0,0,0,0.02)", border: "1.5px dashed rgba(0,0,0,0.1)", color: "#999", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>+ 添加摊销项目</button>}
+      {form && <div style={{ background: "#fff", border: "1px solid rgba(0,0,0,0.1)", borderRadius: 14, padding: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#1a1714", marginBottom: 14 }}>{form.id ? "编辑" : "新增"}摊销项目</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          <input placeholder="名称（如：早餐食材、蛋白粉）" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={{ flex: 1, background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 9, padding: "9px 11px", fontSize: 13, color: "#1a1714" }} />
+          <select value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))} style={{ background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 9, padding: "9px 10px", fontSize: 12, color: "#1a1714", fontFamily: "inherit" }}>
+            {categories.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          <div style={{ position: "relative", flex: 1 }}>
+            <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "#aaa", fontSize: 14 }}>¥</span>
+            <input type="text" inputMode="decimal" placeholder="总金额" value={form.cost} onChange={e => setForm(f => ({ ...f, cost: e.target.value }))} style={{ width: "100%", background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 9, padding: "9px 9px 9px 22px", fontSize: 13, color: "#1a1714" }} />
+          </div>
+          <input type="date" value={form.startDate} onChange={e => setForm(f => ({ ...f, startDate: e.target.value }))} style={{ background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 9, padding: "9px", fontSize: 12, color: "#1a1714", fontFamily: "inherit" }} />
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          {[["days", "按天数平摊"], ["weight", "按用量计算"]].map(([k, l]) => (
+            <button key={k} onClick={() => setForm(f => ({ ...f, mode: k }))} style={{ flex: 1, padding: "8px 0", borderRadius: 9, fontSize: 12, fontWeight: 700, background: form.mode === k ? "#1a1714" : "rgba(0,0,0,0.04)", color: form.mode === k ? "#f5f2ee" : "#5a5550", border: `1px solid ${form.mode === k ? "#1a1714" : "rgba(0,0,0,0.08)"}`, cursor: "pointer" }}>{l}</button>
+          ))}
+        </div>
+        {form.mode === "days" ? (
+          <input type="text" inputMode="numeric" placeholder="平摊天数（如：30）" value={form.days} onChange={e => setForm(f => ({ ...f, days: e.target.value }))} style={{ width: "100%", background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 9, padding: "9px 11px", fontSize: 13, color: "#1a1714", marginBottom: 12 }} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+            {[["total", "totalG", "totalUnit", "总量"], ["daily", "dailyG", "dailyUnit", "每天用量"]].map(([key, gField, uField, label]) => (
+              <div key={key} style={{ display: "flex", gap: 7, alignItems: "center" }}>
+                <input type="text" inputMode="decimal" placeholder={label} value={form[gField]} onChange={e => setForm(f => ({ ...f, [gField]: e.target.value }))} style={{ flex: 1, background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 9, padding: "9px 11px", fontSize: 13, color: "#1a1714" }} />
+                <div style={{ display: "flex", borderRadius: 9, overflow: "hidden", border: "1px solid rgba(0,0,0,0.08)", flexShrink: 0 }}>
+                  {["g", "lb"].map(u => <button key={u} onClick={() => setForm(f => ({ ...f, [uField]: u }))} style={{ padding: "9px 13px", fontSize: 12, fontWeight: 700, background: (form[uField] || "g") === u ? "#1a1714" : "rgba(0,0,0,0.03)", color: (form[uField] || "g") === u ? "#f5f2ee" : "#888", border: "none", cursor: "pointer" }}>{u}</button>)}
+                </div>
+                {form[gField] && (form[uField] || "g") === "lb" && <span style={{ fontSize: 10, color: "#aaa", whiteSpace: "nowrap" }}>≈{(parseFloat(form[gField]) * 453.592).toFixed(0)}g</span>}
+              </div>
+            ))}
+          </div>
+        )}
+        {preview && <div style={{ background: "rgba(22,163,74,0.06)", border: "1px solid rgba(22,163,74,0.15)", borderRadius: 9, padding: "9px 13px", marginBottom: 12, fontSize: 12 }}>
+          <span style={{ color: "#16a34a", fontWeight: 700 }}>¥{preview.dailyCost.toFixed(2)}/天</span>
+          <span style={{ color: "#999", marginLeft: 10 }}>共 {preview.days} 天 · 到 {(() => { const d = new Date(form.startDate + "T00:00:00"); d.setDate(d.getDate() + preview.days - 1); return `${d.getMonth() + 1}月${d.getDate()}日`; })()}</span>
+        </div>}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setForm(null)} style={{ flex: 1, padding: "10px 0", borderRadius: 10, fontSize: 13, fontWeight: 600, background: "rgba(0,0,0,0.05)", color: "#666", border: "none", cursor: "pointer" }}>取消</button>
+          <button onClick={saveItem} disabled={!preview || !form.name.trim()} style={{ flex: 2, padding: "10px 0", borderRadius: 10, fontSize: 13, fontWeight: 700, background: preview && form.name.trim() ? "#1a1714" : "rgba(0,0,0,0.08)", color: preview && form.name.trim() ? "#f5f2ee" : "#aaa", border: "none", cursor: preview && form.name.trim() ? "pointer" : "default" }}>保存</button>
+        </div>
+      </div>}
+    </div>
+  );
+}
+
+function DayBlock({ d, gr, td, data, fmtD, pd, ee, sEE, sedit, sdel, cdel }) {
+  const [open, setOpen] = useState(false);
+  const entryTotal = gr[d].reduce((s, e) => s + e.amount, 0);
+  const amortized = getAmortizedForDay(d, data.recurring);
+  const dT = entryTotal + amortized;
+  const dD = data.dailyLimit - dT;
+  const amortItems = (data.recurring || []).filter(r => {
+    if (!r.active) return false;
+    if (r.startDate > d) return false;
+    const end = new Date(r.startDate + "T00:00:00"); end.setDate(end.getDate() + r.days - 1);
+    return d <= end.toISOString().split("T")[0];
+  });
+  return (
+    <div style={{ marginBottom: 4, paddingLeft: 9 }}>
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: "none", border: "none", borderBottom: "1px solid rgba(0,0,0,0.05)", padding: "4px 2px", cursor: "pointer", marginBottom: 3, fontFamily: "inherit" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ fontSize: 7, color: "#ddd", display: "inline-block", transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span><span style={{ fontSize: 11, fontWeight: 700, color: "#3a3530" }}>{fmtD(d)}</span></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ fontSize: 11, fontWeight: 700, color: "#3a3530", fontVariantNumeric: "tabular-nums" }}>¥{dT.toFixed(2)}</span><Bdg value={dD} over={dD < 0} /></div>
+      </button>
+      {open && <div>
+        {gr[d].map(e => {
+          const ip = pd === e.id; const ie = ee?.id === e.id;
+          return <div key={e.id} className={`er${ip ? " del" : ""}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: ip ? "rgba(239,68,68,0.06)" : "#fff", borderRadius: 8, marginBottom: 3, border: `1px solid ${ip ? "rgba(239,68,68,0.2)" : "rgba(0,0,0,0.06)"}`, transition: "background 0.2s" }}>
+            {ie ? <div style={{ display: "flex", gap: 5, flex: 1, alignItems: "center" }}>
+              <div style={{ position: "relative" }}><span style={{ position: "absolute", left: 6, top: "50%", transform: "translateY(-50%)", color: "#888", fontSize: 12 }}>¥</span><input type="text" inputMode="decimal" value={ee.amount} onChange={ev => sEE(x => ({ ...x, amount: ev.target.value }))} onKeyDown={ev => { if (ev.key === "Enter") sedit(); if (ev.key === "Escape") sEE(null); }} autoFocus style={{ width: 65, background: "rgba(0,0,0,0.06)", border: "1px solid rgba(0,0,0,0.14)", color: "#1a1714", borderRadius: 6, padding: "3px 4px 3px 17px", fontSize: 12, outline: "none", fontFamily: "inherit" }} /></div>
+              <input value={ee.note} onChange={ev => sEE(x => ({ ...x, note: ev.target.value }))} onKeyDown={ev => { if (ev.key === "Enter") sedit(); if (ev.key === "Escape") sEE(null); }} style={{ flex: 1, background: "rgba(0,0,0,0.06)", border: "1px solid rgba(0,0,0,0.14)", color: "#1a1714", borderRadius: 6, padding: "3px 7px", fontSize: 12, outline: "none", fontFamily: "inherit" }} />
+              <button onClick={sedit} style={{ background: "rgba(22,163,74,0.12)", border: "1px solid rgba(22,163,74,0.25)", color: "#16a34a", borderRadius: 6, padding: "3px 7px", fontSize: 11, cursor: "pointer" }}>✓</button>
+              <button onClick={() => sEE(null)} style={{ background: "none", border: "none", color: "#aaa", fontSize: 13, cursor: "pointer", padding: "3px" }}>✕</button>
+            </div> : <>
+              <div style={{ display: "flex", alignItems: "center", gap: 7, flex: 1, minWidth: 0 }}><div style={{ width: 4, height: 4, borderRadius: "50%", background: "rgba(0,0,0,0.15)", flexShrink: 0 }} /><span style={{ fontSize: 12, fontWeight: 500, color: "#6b6560", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.note}</span></div>
+              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                <span style={{ fontSize: 13, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: "#1a1714" }}>¥{e.amount.toFixed(2)}</span>
+                {ip ? <button onClick={cdel} style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.25)", color: "#ef4444", borderRadius: 7, padding: "5px 10px", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}>撤销</button> : <>
+                  <button onClick={() => sEE({ id: e.id, amount: String(e.amount), note: e.note })} style={{ background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.08)", color: "#888", borderRadius: 7, padding: "5px 9px", fontSize: 11, cursor: "pointer" }} onMouseEnter={ev => { ev.currentTarget.style.background = "rgba(0,0,0,0.08)"; ev.currentTarget.style.color = "#444"; }} onMouseLeave={ev => { ev.currentTarget.style.background = "rgba(0,0,0,0.04)"; ev.currentTarget.style.color = "#888"; }}>✎</button>
+                  <button onClick={() => sdel(e.id)} style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.12)", color: "#c05050", borderRadius: 7, padding: "5px 9px", fontSize: 12, cursor: "pointer" }} onMouseEnter={ev => { ev.currentTarget.style.background = "rgba(239,68,68,0.14)"; ev.currentTarget.style.color = "#ef4444"; }} onMouseLeave={ev => { ev.currentTarget.style.background = "rgba(239,68,68,0.06)"; ev.currentTarget.style.color = "#c05050"; }}>✕</button>
+                </>}
+              </div>
+            </>}
+          </div>;
+        })}
+        {amortItems.map(r => (
+          <div key={`a-${r.id}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", background: "rgba(22,163,74,0.03)", borderRadius: 8, marginBottom: 3, border: "1px solid rgba(22,163,74,0.1)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 7, flex: 1 }}>
+              <div style={{ width: 4, height: 4, borderRadius: "50%", background: "rgba(22,163,74,0.4)", flexShrink: 0 }} />
+              <span style={{ fontSize: 12, color: "#7a9470" }}>{r.name}</span>
+              <span style={{ fontSize: 8, color: "#aaa", background: "rgba(0,0,0,0.04)", padding: "1px 4px", borderRadius: 3 }}>摊销</span>
+            </div>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#7a9470", fontVariantNumeric: "tabular-nums" }}>¥{r.dailyCost.toFixed(2)}</span>
+          </div>
+        ))}
+      </div>}
+    </div>
+  );
+}
+
+function WeekBlock({ week, month, hi, gr, td, data, fmtD, wlbl, cw, cm, pd, ee, sEE, sedit, sdel, cdel }) {
+  const [open, setOpen] = useState(week === cw && month === cm);
+  const wd = hi[month][week].sort((a, b) => b.localeCompare(a));
+  const wT = wd.flatMap(d => gr[d]).reduce((s, e) => s + e.amount, 0) + wd.reduce((s, d) => s + getAmortizedForDay(d, data.recurring), 0);
+  const wP = wd.filter(d => d < td);
+  const wS = wP.reduce((a, d) => a + (data.dailyLimit - gr[d].reduce((s, e) => s + e.amount, 0) - getAmortizedForDay(d, data.recurring)), 0);
+  return (
+    <div style={{ marginBottom: 4, paddingLeft: 9 }}>
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(0,0,0,0.03)", border: "1px solid rgba(0,0,0,0.06)", borderRadius: 8, padding: "6px 11px", cursor: "pointer", fontFamily: "inherit" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ fontSize: 8, color: "#ccc", display: "inline-block", transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span><span style={{ fontSize: 11, fontWeight: 600, color: "#5a5550" }}>{wlbl(wd[0], month)}</span></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ fontSize: 10, fontWeight: 600, color: "#7a7470", fontVariantNumeric: "tabular-nums" }}>¥{wT.toFixed(2)}</span><Bdg value={wS} over={wS < 0} /></div>
+      </button>
+      {open && <div style={{ paddingTop: 3 }}>{wd.map(d => <DayBlock key={d} d={d} gr={gr} td={td} data={data} fmtD={fmtD} pd={pd} ee={ee} sEE={sEE} sedit={sedit} sdel={sdel} cdel={cdel} />)}</div>}
+    </div>
+  );
+}
+
+function MonthBlock({ month, mT, mS, defOpen, hi, gr, td, data, fmtD, wlbl, cw, cm, pd, ee, sEE, sedit, sdel, cdel }) {
+  const [open, setOpen] = useState(defOpen);
+  const d2 = new Date(month + "-01T00:00:00");
+  return (
+    <div style={{ marginBottom: 7 }}>
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(0,0,0,0.05)", border: "1px solid rgba(0,0,0,0.08)", borderRadius: 10, padding: "9px 13px", cursor: "pointer", fontFamily: "inherit" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}><span style={{ fontSize: 9, color: "#aaa", display: "inline-block", transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span><span style={{ fontSize: 13, fontWeight: 700, color: "#1a1714" }}>{d2.getFullYear()}年{d2.getMonth() + 1}月</span></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}><span style={{ fontSize: 11, fontWeight: 600, color: "#6b6560", fontVariantNumeric: "tabular-nums" }}>¥{mT.toFixed(2)}</span><Bdg value={mS} over={mS < 0} /></div>
+      </button>
+      {open && <div style={{ paddingTop: 5 }}>{Object.keys(hi[month]).sort((a, b) => b.localeCompare(a)).map(week => <WeekBlock key={week} week={week} month={month} hi={hi} gr={gr} td={td} data={data} fmtD={fmtD} wlbl={wlbl} cw={cw} cm={cm} pd={pd} ee={ee} sEE={sEE} sedit={sedit} sdel={sdel} cdel={cdel} />)}</div>}
+    </div>
+  );
+}
+
+function InputForm({ data, setData, tspTotal, ms, amortizedDaily, isDesktop }) {
+  const [amt, sAmt] = useState("");
+  const [note, sNote] = useState("");
+  const [date, sDate] = useState(new Date().toISOString().split("T")[0]);
+  const ref = useRef(null);
+  const td = new Date().toISOString().split("T")[0];
+  const sds = data.entries.filter(e => e.date === date).reduce((s, e) => s + e.amount, 0) + getAmortizedForDay(date, data.recurring);
+  const iv = parseFloat(amt) || 0;
+  const pd2 = data.dailyLimit - (sds + iv);
+  const sp = iv > 0;
+  const gc = v => v > 0 ? "#16a34a" : v < 0 ? "#ef4444" : "#5a5550";
+  const dl = date === td ? "今天" : `${date.slice(5).replace("-", "月")}日`;
+  const add = () => {
+    const v = parseFloat(amt); if (!v || v <= 0) return;
+    setData(d => ({ ...d, entries: [{ id: Date.now(), amount: v, note: note.trim() || "用餐", date }, ...d.entries] }));
+    sAmt(""); sNote(""); ref.current?.focus();
+  };
+  const p = isDesktop ? 20 : "10px 11px";
+  const r = isDesktop ? 16 : 11;
+  return (
+    <div style={{ background: "#fff", border: `1.5px solid ${sp ? (pd2 >= 0 ? "rgba(22,163,74,0.4)" : "rgba(239,68,68,0.4)") : "rgba(0,0,0,0.1)"}`, borderRadius: r, padding: p }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isDesktop ? 14 : 9, minHeight: 16 }}>
+        <div style={{ fontSize: isDesktop ? 11 : 9, fontWeight: 700, color: "#888", letterSpacing: "0.1em", textTransform: "uppercase" }}>记录花销</div>
+        {sp && <span style={{ fontSize: isDesktop ? 13 : 11, fontWeight: 700, color: gc(pd2), fontVariantNumeric: "tabular-nums" }}>{dl} {pd2 >= 0 ? "还剩" : "超出"} {pd2 >= 0 ? "+" : "-"}¥{Math.abs(pd2).toFixed(2)}</span>}
+      </div>
+      <div style={{ display: "flex", gap: isDesktop ? 8 : 6, marginBottom: isDesktop ? 10 : 6 }}>
+        <div style={{ position: "relative", flex: 1 }}>
+          <span style={{ position: "absolute", left: isDesktop ? 11 : 9, top: "50%", transform: "translateY(-50%)", color: "#888", fontSize: isDesktop ? 16 : 13, pointerEvents: "none" }}>¥</span>
+          <input ref={ref} type="text" inputMode="decimal" placeholder="输入金额" value={amt} onChange={e => sAmt(e.target.value)} onKeyDown={e => e.key === "Enter" && add()} style={{ width: "100%", background: "#f8f7f5", border: `1.5px solid ${sp ? (pd2 >= 0 ? "rgba(22,163,74,0.5)" : "rgba(239,68,68,0.5)") : "rgba(0,0,0,0.15)"}`, color: "#1a1714", borderRadius: 10, padding: isDesktop ? "12px 12px 12px 28px" : "10px 10px 10px 22px", fontSize: isDesktop ? 16 : 14 }} />
+        </div>
+        <DatePicker value={date} onChange={sDate} entries={data.entries} dailyLimit={data.dailyLimit} recurring={data.recurring} />
+      </div>
+      {sp && <div style={{ display: "flex", justifyContent: "space-between", background: pd2 >= 0 ? "rgba(22,163,74,0.05)" : "rgba(239,68,68,0.05)", border: `1px solid ${pd2 >= 0 ? "rgba(22,163,74,0.15)" : "rgba(239,68,68,0.15)"}`, borderRadius: 8, padding: "5px 10px", marginBottom: isDesktop ? 10 : 7, fontSize: isDesktop ? 12 : 10, fontWeight: 600 }}>
+        <span style={{ color: "#4a4540" }}>¥{sds.toFixed(2)} + ¥{iv.toFixed(2)} = ¥{(sds + iv).toFixed(2)}</span>
+        <span style={{ color: "#888" }}>限 ¥{data.dailyLimit}</span>
+      </div>}
+      <div style={{ display: "flex", gap: isDesktop ? 8 : 5, marginBottom: isDesktop ? 10 : 4, flexWrap: "wrap" }}>
+        {["早饭", "午饭", "晚饭", "杂食"].map(tag => <button key={tag} onClick={() => sNote(note === tag ? "" : tag)} style={{ fontSize: isDesktop ? 13 : 10, fontWeight: 600, padding: isDesktop ? "7px 16px" : "3px 8px", borderRadius: 8, background: note === tag ? "#1a1714" : "#f0ede8", color: note === tag ? "#f5f2ee" : "#3a3530", border: `1px solid ${note === tag ? "#1a1714" : "rgba(0,0,0,0.12)"}`, cursor: "pointer" }}>{tag}</button>)}
+      </div>
+      <div style={{ display: "flex", gap: isDesktop ? 8 : 7 }}>
+        <input placeholder="或自定义备注" value={note} onChange={e => sNote(e.target.value)} onKeyDown={e => e.key === "Enter" && add()} style={{ flex: 1, background: "#f8f7f5", border: "1.5px solid rgba(0,0,0,0.14)", color: "#1a1714", borderRadius: 10, padding: isDesktop ? "12px" : "10px", fontSize: isDesktop ? 13 : 12, fontWeight: 600 }} />
+        <button onClick={add} style={{ background: "#1a1714", border: "none", color: "#f5f2ee", borderRadius: 10, padding: isDesktop ? "12px 22px" : "10px 16px", fontSize: isDesktop ? 14 : 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>+ 添加</button>
+      </div>
+    </div>
+  );
+}
+
+function StatusBanner({ cd, dr, data, rem, tsp, amortizedDaily, isDesktop }) {
+  const t = new Date();
+  const td = t.toISOString().split("T")[0];
+  const dm = new Date(t.getFullYear(), t.getMonth() + 1, 0).getDate();
+  const dLeft = dm - t.getDate();
+  const daysFromToday = dLeft + 1;
+  let futAmortTotal = 0;
+  for (let d = t.getDate(); d <= dm; d++) {
+    const ds = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    futAmortTotal += getAmortizedForDay(ds, data.recurring);
+  }
+  const futAmortPerDay = daysFromToday > 0 ? futAmortTotal / daysFromToday : 0;
+  const isBehind = cd < 0;
+  const deficit = Math.abs(Math.min(0, cd));
+  const p = isDesktop ? 20 : "8px 11px";
+  const r = isDesktop ? 16 : 11;
+  const mb = isDesktop ? 0 : 8;
+  if (isBehind) {
+    return (
+      <div style={{ background: "#fff", border: "1.5px solid rgba(239,68,68,0.35)", borderRadius: r, padding: p, marginBottom: mb }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: isDesktop ? 14 : 8 }}>
+          <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#ef4444", flexShrink: 0 }} />
+          <span style={{ fontSize: isDesktop ? 13 : 12, fontWeight: 700, color: "#ef4444" }}>累计亏 ¥{deficit.toFixed(0)}，需少花才能补回</span>
+        </div>
+        <div style={{ display: "flex", gap: isDesktop ? 10 : 8 }}>
+          {[1, 3].map(days => {
+            const effectiveDays = Math.min(days, daysFromToday);
+            const savePer = deficit / effectiveDays;
+            const spendPer = data.dailyLimit - futAmortPerDay - savePer;
+            const feasible = spendPer > 0;
+            return (
+              <div key={days} style={{ flex: 1, padding: isDesktop ? "12px 14px" : "7px 9px", borderRadius: 10, background: "rgba(239,68,68,0.04)", border: "1px solid rgba(239,68,68,0.1)" }}>
+                <div style={{ fontSize: isDesktop ? 11 : 9, fontWeight: 700, color: "#888", marginBottom: isDesktop ? 6 : 3 }}>{days === 1 ? "明天还清" : "3天还清"}</div>
+                {feasible ? <>
+                  <div style={{ fontSize: isDesktop ? 20 : 18, fontWeight: 700, color: "#1a1714", fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>¥{spendPer.toFixed(0)}<span style={{ fontSize: isDesktop ? 12 : 9, color: "#aaa", fontWeight: 400 }}>/天</span></div>
+                  <div style={{ fontSize: isDesktop ? 11 : 8, color: "#ef4444", marginTop: isDesktop ? 5 : 3, fontWeight: 600 }}>少花 ¥{savePer.toFixed(1)}/天</div>
+                  {futAmortPerDay > 0 && <div style={{ fontSize: 8, color: "#bbb", marginTop: 2 }}>摊销占 ¥{futAmortPerDay.toFixed(1)}</div>}
+                </> : <><div style={{ fontSize: 13, color: "#ef4444", fontWeight: 700 }}>需倒贴</div><div style={{ fontSize: 9, color: "#aaa", marginTop: 2 }}>缺口太大</div></>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  } else {
+    const usablePerDay = dLeft > 0 ? Math.max(0, rem / dLeft - futAmortPerDay) : 0;
+    return (
+      <div style={{ background: "#fff", border: "1.5px solid rgba(22,163,74,0.3)", borderRadius: r, padding: p, marginBottom: mb }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: isDesktop ? 14 : 8 }}>
+          <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#16a34a", flexShrink: 0 }} />
+          <span style={{ fontSize: isDesktop ? 13 : 12, fontWeight: 700, color: "#16a34a" }}>在预算内，保持下去</span>
+        </div>
+        <div style={{ display: "flex", gap: isDesktop ? 10 : 8 }}>
+          {[["今天剩余", `¥${Math.max(0, dr).toFixed(0)}`, `限额 ¥${data.dailyLimit}`], ["可用日均", `¥${usablePerDay.toFixed(0)}`, "扣摊销后"]].map(([label, val, sub]) => (
+            <div key={label} style={{ flex: 1, padding: isDesktop ? "12px 14px" : "7px 9px", borderRadius: 10, background: "rgba(22,163,74,0.04)", border: "1px solid rgba(22,163,74,0.1)" }}>
+              <div style={{ fontSize: isDesktop ? 11 : 9, fontWeight: 700, color: "#888", marginBottom: isDesktop ? 6 : 3 }}>{label}</div>
+              <div style={{ fontSize: isDesktop ? 20 : 18, fontWeight: 700, color: "#1a1714", fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{val}</div>
+              <div style={{ fontSize: isDesktop ? 11 : 8, color: "#aaa", marginTop: isDesktop ? 5 : 3 }}>{sub}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+}
+
+export default function MealTracker() {
+  const [data, _setData] = useState(load);
+  const setData = u => { _setData(p => { const n = typeof u === "function" ? u(p) : u; save(n); return n; }); };
+  const [tab, sTab] = useState("home");
+  const [syncTxt, setSyncTxt] = useState("");
+  const [syncMsg, setSyncMsg] = useState(null);
+  const [ee, sEE] = useState(null); const [pd, sPD] = useState(null); const [dt, sDT] = useState(null);
+  const [bs, setBs] = useState(false); const [ds2, setDs] = useState(false);
+  const winW = useWindowWidth();
+  const isDesktop = winW >= 768;
+
+  const flash = (t, ok = true) => { setSyncMsg({ t, ok }); setTimeout(() => setSyncMsg(null), 3000); };
+  const td = new Date().toISOString().split("T")[0];
+  const tm = td.slice(0, 7);
+  const me = data.entries.filter(e => e.date.startsWith(tm));
+  const msEntries = me.reduce((s, e) => s + e.amount, 0);
+  const todayNum = parseInt(td.slice(8));
+  const msAmortized = (data.recurring || []).filter(r => r.active).reduce((s, r) => {
+    if (!r.startDate.startsWith(tm)) return s;
+    const startDay = parseInt(r.startDate.slice(8));
+    const effectiveDays = Math.min(todayNum - startDay + 1, r.days);
+    return s + (effectiveDays > 0 ? effectiveDays * r.dailyCost : 0);
+  }, 0);
+  const ms = msEntries + msAmortized;
+  const rem = data.monthlyBudget - ms;
+  const up = Math.min(100, (ms / data.monthlyBudget) * 100);
+  const tc = up >= 100 ? "#ef4444" : up >= 80 ? "#f97316" : "#16a34a";
+  const amortizedDaily = getAmortizedForDay(td, data.recurring);
+  const tsp = data.entries.filter(e => e.date === td).reduce((s, e) => s + e.amount, 0);
+  const tspTotal = tsp + amortizedDaily;
+  const dr = data.dailyLimit - tspTotal;
+  const dov = dr < 0;
+  const dc = dov ? "#ef4444" : dr < 8 ? "#f97316" : "#16a34a";
+
+  const todayD = new Date(td + "T00:00:00");
+  const monthStart = new Date(todayD.getFullYear(), todayD.getMonth(), 1);
+  const daysElapsed = Math.floor((todayD - monthStart) / 86400000) + 1;
+  const cd = (() => {
+    let total = 0;
+    const cur = new Date(monthStart);
+    while (cur <= todayD) {
+      const ds = cur.toISOString().split("T")[0];
+      const entrySpend = data.entries.filter(e => e.date === ds).reduce((x, e) => x + e.amount, 0);
+      const amort = getAmortizedForDay(ds, data.recurring);
+      if (entrySpend > 0 || amort > 0) total += data.dailyLimit - entrySpend - amort;
+      cur.setDate(cur.getDate() + 1);
+    }
+    return total;
+  })();
+  const co = cd < 0; const cc = co ? "#ef4444" : "#16a34a";
+  const past = [...new Set(me.map(e => e.date))].filter(d => d <= td);
+  const safeDays = past.filter(d => {
+    const sp = data.entries.filter(e => e.date === d).reduce((s, e) => s + e.amount, 0) + getAmortizedForDay(d, data.recurring);
+    return sp <= data.dailyLimit;
+  }).length;
+  const overDays = past.length - safeDays;
+
+  const sedit = () => { if (!ee) return; const v = parseFloat(ee.amount); if (!v || v <= 0) { sEE(null); return; } setData(d => ({ ...d, entries: d.entries.map(e => e.id === ee.id ? { ...e, amount: v, note: ee.note || "用餐" } : e) })); sEE(null); };
+  const sdel = id => { if (dt) clearTimeout(dt); sPD(id); sDT(setTimeout(() => { setData(d => ({ ...d, entries: d.entries.filter(e => e.id !== id) })); sPD(null); sDT(null); }, 1800)); };
+  const cdel = () => { if (dt) clearTimeout(dt); sPD(null); sDT(null); };
+
+  const doExport = () => {
+    const json = JSON.stringify(data);
+    navigator.clipboard.writeText(json).then(() => flash("已复制到剪贴板！")).catch(() => { const ta = document.getElementById("exp-ta"); if (ta) { ta.select(); ta.setSelectionRange(0, 99999); } flash("请手动全选复制", false); });
+  };
+  const doImport = () => {
+    try {
+      const p = JSON.parse(syncTxt.trim());
+      if (!p.entries || !Array.isArray(p.entries)) throw 0;
+      let ne = 0, nr = 0;
+      setData(cur => {
+        const ei = new Set(cur.entries.map(e => e.id));
+        const newE = p.entries.filter(e => !ei.has(e.id)); ne = newE.length;
+        const ri = new Set((cur.recurring || []).map(r => r.id));
+        const newR = (p.recurring || []).filter(r => !ri.has(r.id)); nr = newR.length;
+        return { ...cur, entries: [...cur.entries, ...newE].sort((a, b) => b.id - a.id), recurring: [...(cur.recurring || []), ...newR] };
+      });
+      const parts = []; if (ne > 0) parts.push(`记录 +${ne}`); if (nr > 0) parts.push(`摊销 +${nr}`);
+      flash(parts.length > 0 ? `合并完成：${parts.join("，")}` : "已是最新，无需合并");
+      setSyncTxt("");
+    } catch { flash("格式有误", false); }
+  };
+
+  const gr = data.entries.reduce((a, e) => { (a[e.date] = a[e.date] || []).push(e); return a; }, {});
+  const sd3 = Object.keys(gr).sort((a, b) => b.localeCompare(a));
+  const fmtD = str => { if (str === td) return "今天"; const y = new Date(); y.setDate(y.getDate() - 1); if (str === y.toISOString().split("T")[0]) return "昨天"; const d = new Date(str + "T00:00:00"); return `${d.getMonth() + 1}月${d.getDate()}日`; };
+  const gw = s => { const day = parseInt(s.slice(8)); return `${s.slice(0, 7)}-W${Math.floor((day - 1) / 7) + 1}`; };
+  const wlbl = (s, m) => { const day = parseInt(s.slice(8)); const wn = Math.floor((day - 1) / 7) + 1; const st = (wn - 1) * 7 + 1; const dim = new Date(parseInt(m.slice(0, 4)), parseInt(m.slice(5)), 0).getDate(); return `${parseInt(m.slice(5))}/${st}–${parseInt(m.slice(5))}/${Math.min(st + 6, dim)}`; };
+  const hi = {}; sd3.forEach(s => { const mo = s.slice(0, 7); const wk = gw(s); if (!hi[mo]) hi[mo] = {}; if (!hi[mo][wk]) hi[mo][wk] = []; hi[mo][wk].push(s); });
+  const sm3 = Object.keys(hi).sort((a, b) => b.localeCompare(a));
+  const cm = td.slice(0, 7); const cw = gw(td);
+  const r = 36, circ = 2 * Math.PI * r;
+
+  const px = isDesktop ? "12px 32px" : "10px 14px";
+  const tabPx = isDesktop ? "8px 32px" : "6px 10px";
+  const contentPx = isDesktop ? "20px 32px" : "10px 10px";
+
+  return (
+    <div style={{ background: "#f5f2ee", color: "#1a1714", minHeight: "100vh", fontFamily: "'Noto Serif SC', Georgia, serif", fontWeight: 500 }}>
+      <link href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@500;600;700&display=swap" rel="stylesheet" />
+      <style>{`*{box-sizing:border-box;margin:0;padding:0}input,button,select{font-family:inherit;outline:none}@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-5px)}40%{transform:translateX(5px)}60%{transform:translateX(-3px)}80%{transform:translateX(3px)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}.er{animation:fadeUp 0.22s ease}.del{animation:pulse 0.7s ease infinite}`}</style>
+
+      {/* Header */}
+      <div style={{ borderBottom: "1px solid rgba(0,0,0,0.08)", padding: isDesktop ? px : "16px 14px 10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: isDesktop ? 9 : 11, fontWeight: 700, letterSpacing: isDesktop ? "0.25em" : "0.2em", color: "#888", textTransform: "uppercase", marginBottom: 3 }}>饮食账本</div>
+          <div style={{ fontSize: isDesktop ? 26 : 28, fontWeight: 400, fontFamily: isDesktop ? "inherit" : "'Ma Shan Zheng', serif", letterSpacing: isDesktop ? 0 : 2 }}>{tab === "home" ? "概览" : tab === "records" ? "记录" : tab === "amort" ? "摊销" : "同步"}</div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 9, color: "#888", marginBottom: 1 }}>本月剩余</div>
+          <N v={rem} c={tc} s={{ fontSize: isDesktop ? 24 : 20, fontWeight: 700 }} /><span style={{ fontSize: isDesktop ? 9 : 11, color: "#aaa", marginLeft: 3 }}>元</span>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ padding: tabPx, borderBottom: "1px solid rgba(0,0,0,0.06)", display: "flex", gap: isDesktop ? 10 : 6 }}>
+        {[{ k: "home", l: "概览" }, { k: "records", l: "记录" }, { k: "amort", l: "∞ 摊销" }, { k: "sync", l: "同步" }].map(t => (
+          <button key={t.k} onClick={() => sTab(t.k)} style={{ padding: isDesktop ? "8px 24px" : "5px 0", flex: isDesktop ? "none" : 1, borderRadius: 10, fontSize: isDesktop ? 13 : 12, fontWeight: 700, background: tab === t.k ? "#1a1714" : "transparent", color: tab === t.k ? "#f5f2ee" : t.k === "amort" ? "#16a34a" : "#6b6560", border: `1px solid ${tab === t.k ? "#1a1714" : t.k === "amort" ? "rgba(22,163,74,0.3)" : "rgba(0,0,0,0.1)"}`, cursor: "pointer", transition: "all 0.15s" }}>{t.l}</button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div style={{ padding: contentPx, maxWidth: isDesktop ? 1400 : "100%", margin: "0 auto" }}>
+
+        {/* AMORT TAB */}
+        {tab === "amort" && <RecurringPanel data={data} setData={setData} />}
+
+        {/* SYNC TAB */}
+        {tab === "sync" && <div>
+          <p style={{ fontSize: 13, color: "#5a5550", marginBottom: 20, lineHeight: 1.7 }}>导出数据发给自己，在另一台设备「同步」标签粘贴导入。导入只补充缺少的记录，不覆盖现有数据。</p>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#1a1714", marginBottom: 8 }}>导出数据</div>
+            <textarea id="exp-ta" readOnly value={JSON.stringify(data)} onClick={e => { e.target.select(); e.target.setSelectionRange(0, 99999); }} style={{ width: "100%", height: 80, background: "#fff", border: "1.5px solid rgba(0,0,0,0.12)", borderRadius: 10, padding: "10px", fontSize: 10, color: "#3a3530", resize: "none", fontFamily: "monospace", display: "block", marginBottom: 10 }} />
+            <button onClick={doExport} style={{ width: "100%", padding: "12px 0", borderRadius: 10, fontSize: 13, fontWeight: 700, background: "#1a1714", color: "#f5f2ee", border: "none", cursor: "pointer" }}>一键复制到剪贴板</button>
+          </div>
+          <div style={{ borderTop: "1px solid rgba(0,0,0,0.08)", paddingTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#1a1714", marginBottom: 8 }}>导入数据</div>
+            <textarea value={syncTxt} onChange={e => setSyncTxt(e.target.value)} placeholder="将另一台设备导出的内容粘贴到这里…" style={{ width: "100%", height: 100, background: "#fff", border: "1.5px solid rgba(0,0,0,0.12)", borderRadius: 10, padding: "10px", fontSize: 10, color: "#1a1714", resize: "none", fontFamily: "monospace", display: "block", marginBottom: 10 }} />
+            <button onClick={doImport} disabled={!syncTxt.trim()} style={{ width: "100%", padding: "12px 0", borderRadius: 10, fontSize: 13, fontWeight: 700, background: syncTxt.trim() ? "#1a1714" : "rgba(0,0,0,0.08)", color: syncTxt.trim() ? "#f5f2ee" : "#aaa", border: "none", cursor: syncTxt.trim() ? "pointer" : "default" }}>确认导入</button>
+          </div>
+          {syncMsg && <div style={{ marginTop: 12, fontSize: 12, fontWeight: 600, color: syncMsg.ok ? "#16a34a" : "#ef4444", padding: "10px 14px", borderRadius: 10, background: syncMsg.ok ? "rgba(22,163,74,0.08)" : "rgba(239,68,68,0.08)" }}>{syncMsg.t}</div>}
+        </div>}
+
+        {/* HOME TAB */}
+        {tab === "home" && (isDesktop ? (
+          /* DESKTOP */
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 16 }}>
+              {/* Budget card */}
+              <div style={{ background: "#fff", border: `1.5px solid ${up >= 100 ? "rgba(239,68,68,0.4)" : "rgba(0,0,0,0.1)"}`, borderRadius: 16, padding: 20, animation: bs ? "shake 0.6s ease" : "none" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#888", letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 14 }}>{new Date(td + "T00:00:00").getFullYear()}年{new Date(td + "T00:00:00").getMonth() + 1}月预算</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                  <svg width="90" height="90" viewBox="0 0 84 84" style={{ flexShrink: 0 }}>
+                    <circle cx="42" cy="42" r={r} strokeWidth="5" fill="none" stroke="rgba(0,0,0,0.07)" />
+                    <circle cx="42" cy="42" r={r} strokeWidth="5" fill="none" stroke={tc} strokeDasharray={circ} strokeDashoffset={circ * (1 - up / 100)} strokeLinecap="round" transform="rotate(-90 42 42)" style={{ transition: "stroke-dashoffset 0.7s" }} />
+                    <text x="42" y="40" textAnchor="middle" fill="#1a1714" fontSize="14" fontWeight="700">{up.toFixed(0)}%</text>
+                    <text x="42" y="54" textAnchor="middle" fill="#5a5550" fontSize="9">已用</text>
+                  </svg>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, color: "#888", marginBottom: 3 }}>本月已花</div>
+                    <N v={ms} c={tc} s={{ fontSize: 26, fontWeight: 700, lineHeight: 1 }} dec={0} />
+                    <div style={{ fontSize: 12, color: "#888", margin: "12px 0 4px" }}>月度预算</div>
+                    <EditBudget value={data.monthlyBudget} onSave={v => setData(d => ({ ...d, monthlyBudget: v }))} />
+                  </div>
+                </div>
+              </div>
+              {/* Daily card */}
+              <div style={{ background: "#fff", border: `1.5px solid ${dov ? "rgba(239,68,68,0.4)" : "rgba(0,0,0,0.1)"}`, borderRadius: 16, padding: 20, display: "flex", flexDirection: "column", justifyContent: "space-between", animation: ds2 ? "shake 0.6s ease" : "none" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#888", letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 14 }}>今日限额</div>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#5a5550", marginBottom: 8 }}>{dov ? "今天超了" : "今天还能花"}</div>
+                  <N v={Math.abs(dr)} c={dc} s={{ fontSize: 36, fontWeight: 700, lineHeight: 1 }} dec={0} />
+                  <div style={{ marginTop: 12, height: 5, background: "rgba(0,0,0,0.07)", borderRadius: 3, overflow: "hidden" }}>
+                    <div style={{ height: "100%", borderRadius: 3, width: `${Math.min(100, (tspTotal / data.dailyLimit) * 100)}%`, background: dc, transition: "width 0.6s" }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
+                    <span style={{ fontSize: 12, color: "#666" }}>已花 ¥{tspTotal.toFixed(1)}{amortizedDaily > 0 && <span style={{ color: "#999" }}> (含摊 ¥{amortizedDaily.toFixed(1)})</span>}</span>
+                    <span style={{ fontSize: 12, color: "#555" }}>共 ¥{data.dailyLimit}</span>
+                  </div>
+                </div>
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 12, color: "#555", marginBottom: 5 }}>每日限额</div>
+                  <EditLimit value={data.dailyLimit} onSave={v => setData(d => ({ ...d, dailyLimit: v }))} />
+                </div>
+              </div>
+              {/* Status card */}
+              <StatusBanner cd={cd} dr={dr} data={data} rem={rem} tsp={tsp} amortizedDaily={amortizedDaily} isDesktop={true} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 16 }}>
+              <CumulativeCard cd={cd} cc={cc} co={co} past={past} safeDays={safeDays} overDays={overDays} daysElapsed={daysElapsed} td={td} tsp={tsp} rem={rem} data={data} forceOpen={true} />
+              <InputForm data={data} setData={setData} tspTotal={tspTotal} ms={ms} amortizedDaily={amortizedDaily} isDesktop={true} />
+            </div>
+          </div>
+        ) : (
+          /* MOBILE */
+          <div>
+            <div style={{ display: "flex", gap: 7, marginBottom: 8 }}>
+              <div style={{ background: "#fff", border: `1.5px solid ${up >= 100 ? "rgba(239,68,68,0.4)" : "rgba(0,0,0,0.1)"}`, borderRadius: 14, padding: 10, flex: 1, animation: bs ? "shake 0.6s ease" : "none" }}>
+                <div style={{ fontSize: 9, fontWeight: 700, color: "#888", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>{new Date(td + "T00:00:00").getFullYear()}年{new Date(td + "T00:00:00").getMonth() + 1}月预算</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                  <svg width="64" height="64" viewBox="0 0 84 84" style={{ flexShrink: 0 }}>
+                    <circle cx="42" cy="42" r={r} strokeWidth="5" fill="none" stroke="rgba(0,0,0,0.07)" />
+                    <circle cx="42" cy="42" r={r} strokeWidth="5" fill="none" stroke={tc} strokeDasharray={circ} strokeDashoffset={circ * (1 - up / 100)} strokeLinecap="round" transform="rotate(-90 42 42)" style={{ transition: "stroke-dashoffset 0.7s" }} />
+                    <text x="42" y="39" textAnchor="middle" fill="#1a1714" fontSize="12" fontWeight="700">{up.toFixed(0)}%</text>
+                    <text x="42" y="53" textAnchor="middle" fill="#5a5550" fontSize="8">已用</text>
+                  </svg>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: "#888", marginBottom: 1 }}>本月已花</div>
+                    <N v={ms} c={tc} s={{ fontSize: 18, fontWeight: 700 }} dec={0} />
+                    <div style={{ fontSize: 10, fontWeight: 700, color: "#888", margin: "5px 0 2px" }}>月度预算</div>
+                    <EditBudget value={data.monthlyBudget} onSave={v => setData(d => ({ ...d, monthlyBudget: v }))} />
+                  </div>
+                </div>
+              </div>
+              <div style={{ background: "#fff", border: `1.5px solid ${dov ? "rgba(239,68,68,0.4)" : "rgba(0,0,0,0.1)"}`, borderRadius: 14, padding: 10, flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", animation: ds2 ? "shake 0.6s ease" : "none" }}>
+                <div style={{ fontSize: 9, fontWeight: 700, color: "#888", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>今日限额</div>
+                <div style={{ marginBottom: 7 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#888", marginBottom: 3 }}>{dov ? "今天超了" : "今天还能花"}</div>
+                  <N v={Math.abs(dr)} c={dc} s={{ fontSize: 28, fontWeight: 700, lineHeight: 1 }} dec={0} />
+                  <div style={{ marginTop: 6, height: 3, background: "rgba(0,0,0,0.07)", borderRadius: 2, overflow: "hidden" }}>
+                    <div style={{ height: "100%", borderRadius: 2, width: `${Math.min(100, (tspTotal / data.dailyLimit) * 100)}%`, background: dc, transition: "width 0.6s" }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
+                    <span style={{ fontSize: 8, color: "#666" }}>已花 ¥{tspTotal.toFixed(1)}{amortizedDaily > 0 && <span style={{ color: "#999" }}> (摊¥{amortizedDaily.toFixed(1)})</span>}</span>
+                    <span style={{ fontSize: 8, color: "#555" }}>共¥{data.dailyLimit}</span>
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#555", marginBottom: 2 }}>每日限额</div>
+                  <EditLimit value={data.dailyLimit} onSave={v => setData(d => ({ ...d, dailyLimit: v }))} />
+                </div>
+              </div>
+            </div>
+            <StatusBanner cd={cd} dr={dr} data={data} rem={rem} tsp={tsp} amortizedDaily={amortizedDaily} isDesktop={false} />
+            <CumulativeCard cd={cd} cc={cc} co={co} past={past} safeDays={safeDays} overDays={overDays} daysElapsed={daysElapsed} td={td} tsp={tsp} rem={rem} data={data} forceOpen={false} />
+            <InputForm data={data} setData={setData} tspTotal={tspTotal} ms={ms} amortizedDaily={amortizedDaily} isDesktop={false} />
+          </div>
+        ))}
+
+        {/* RECORDS TAB */}
+        {tab === "records" && <>
+          {sd3.length === 0
+            ? <div style={{ textAlign: "center", color: "#bbb", fontSize: 13, padding: "60px 0" }}>还没有记录，去概览页添加</div>
+            : sm3.map(month => {
+              const allDatesInMonth = Object.values(hi[month]).flat();
+              const mT = allDatesInMonth.flatMap(d => gr[d]).reduce((s, e) => s + e.amount, 0) + allDatesInMonth.reduce((s, d) => s + getAmortizedForDay(d, data.recurring), 0);
+              const mP = allDatesInMonth.filter(d => d < td);
+              const mS = mP.reduce((a, d) => a + (data.dailyLimit - gr[d].reduce((s, e) => s + e.amount, 0) - getAmortizedForDay(d, data.recurring)), 0);
+              return <MonthBlock key={month} month={month} mT={mT} mS={mS} defOpen={month === cm} hi={hi} gr={gr} td={td} data={data} fmtD={fmtD} wlbl={wlbl} cw={cw} cm={cm} pd={pd} ee={ee} sEE={sEE} sedit={sedit} sdel={sdel} cdel={cdel} />;
+            })}
+        </>}
+      </div>
+    </div>
+  );
+}
